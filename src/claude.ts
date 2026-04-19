@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { Receipt } from "./db.js";
+import type { Receipt, WeeklyStats } from "./db.js";
 
 const client = new Anthropic();
 const MODEL = "claude-sonnet-4-6";
@@ -38,19 +38,23 @@ Intent rules:
 - "smalltalk": greetings / ambiguous. Reply briefly, "promise" null.
 
 Timezone handling:
-- The user turn will specify a "now" (UTC) and a "timezone" (IANA, e.g. America/New_York).
+- The user turn will specify "now_utc" and "timezone" (IANA, e.g. America/New_York).
 - Interpret relative times ("tomorrow 4pm", "in 30 min") against the user's timezone, not UTC.
 - ALWAYS return deadlines in ISO 8601 UTC (ending in Z).
 - In replies, refer to times in the user's LOCAL phrasing ("Wed 4pm", "in 20 min"), never raw ISO strings.
 - Never invent a deadline when none was stated.
 
 Memory / streak awareness:
-- recent_receipts may contain prior promises — including ones that were dropped, nudged but not closed, or done.
-- When a NEW promise rhymes with a past one the user DROPPED or never closed out, gently name it.
-  Example reply: "3rd time you've told me this one. want me to actually hold you this time, or are we pretending again?"
-- When a new promise matches one they DID close, a light callback is nice: "last time you actually did it — let's repeat."
+- recent_receipts may contain prior promises — including ones dropped, nudged but not closed, or done.
+- When a NEW promise rhymes with a past one the user DROPPED or never closed, gently name it.
+  Example: "3rd time you've told me this one. want me to actually hold you this time, or are we pretending?"
+- When a new promise matches one they DID close, a light callback: "last time you actually did it — let's repeat."
 - Never fabricate history. Only reference receipts that appear in recent_receipts.
-- Never be preachy or shame-y. Dry > moralistic.
+
+Stats awareness:
+- weekly_stats gives the user's keep/drop ratio for the last 7 days. Use it ONLY when it feels natural — a brief mention every few replies, not every time. Dry, never preachy.
+- Examples of good usage: "you've kept 3 in a row, don't break it now." "this'd be your 4th kept this week."
+- If stats are weak (mostly dropped), don't rub it in. Acknowledge + keep moving.
 
 Never invent receipts. Never assume a promise is flaking unless the user says so.`;
 
@@ -81,12 +85,16 @@ function contextBlock(ctx: Receipt[]): string {
   return ctx
     .map(
       (r) =>
-        `#${r.id} [${r.status}] "${r.text}"` +
+        `#${r.id} [${r.status}${r.nudge_count ? ` x${r.nudge_count}` : ""}] "${r.text}"` +
         (r.reason ? ` — reason: "${r.reason}"` : "") +
         (r.deadline ? ` — due ${r.deadline}` : "") +
         ` — saved ${r.created_at}`,
     )
     .join("\n");
+}
+
+function statsBlock(s: WeeklyStats): string {
+  return `kept=${s.kept} dropped=${s.dropped} open=${s.open} total_made=${s.total_made} (7 day window)`;
 }
 
 export async function decide(opts: {
@@ -95,8 +103,9 @@ export async function decide(opts: {
   now: Date;
   timezone: string;
   context: Receipt[];
+  stats: WeeklyStats;
 }): Promise<Decision> {
-  const { userText, handle, now, timezone, context } = opts;
+  const { userText, handle, now, timezone, context, stats } = opts;
 
   const response = await client.messages.create({
     model: MODEL,
@@ -110,6 +119,7 @@ export async function decide(opts: {
           `timezone: ${timezone}\n` +
           `local_time: ${formatLocal(now, timezone)}\n` +
           `from_handle: ${handle}\n` +
+          `weekly_stats: ${statsBlock(stats)}\n` +
           `recent_receipts:\n${contextBlock(context)}\n\n` +
           `message:\n${userText}\n\n` +
           `Respond with JSON only. No prose, no code fences.`,
@@ -167,7 +177,23 @@ function formatLocal(d: Date, tz: string): string {
   }
 }
 
-export async function nudge(receipt: Receipt, timezone: string): Promise<string> {
+const NUDGE_TONES: Record<1 | 2 | 3, string> = {
+  1: `Warm, brief, a touch dry. Quote the user's own reason verbatim in quotes.
+First nudge — think of a friend checking in. "Hey, this is the time you said."`,
+  2: `Drier, more direct. It's been a while since the first nudge and no answer.
+Still warm, not scolding. Quote the reason again but with a slight edge.
+Example tone: "Still on for this? You said [reason]."`,
+  3: `Pointed but not cruel. Third nudge — they've been ghosting.
+Pull the receipt hard. Quote their reason verbatim then challenge it gently.
+Example tone: "Pulling your receipt: [reason]. Still true, or are we pretending?"
+End with a direct question they have to answer.`,
+};
+
+export async function nudge(
+  receipt: Receipt,
+  timezone: string,
+  level: 1 | 2 | 3 = 1,
+): Promise<string> {
   const dueLocal = receipt.deadline
     ? formatLocal(new Date(receipt.deadline), timezone)
     : null;
@@ -177,17 +203,57 @@ export async function nudge(receipt: Receipt, timezone: string): Promise<string>
     max_tokens: 200,
     system:
       `You write one-line iMessage nudges for promises people made to themselves.\n` +
-      `Style: warm, brief, a touch dry. No emojis unless the original text had them. <= 200 chars. No markdown.\n` +
-      `Always quote the user's own reason verbatim in quotes when one exists.\n` +
-      `Refer to times in the user's local phrasing ("4pm", "now"), never raw ISO strings.`,
+      `<= 200 chars. No markdown. No emojis unless the original text had them.\n` +
+      `Refer to times in the user's local phrasing, never raw ISO strings.\n\n` +
+      `Level ${level} tone:\n${NUDGE_TONES[level]}`,
     messages: [
       {
         role: "user",
         content:
           `Promise: "${receipt.text}"\n` +
           (receipt.reason ? `Their reason: "${receipt.reason}"\n` : "") +
-          (dueLocal ? `Due (local): ${dueLocal}\n` : "") +
+          (dueLocal ? `Was due (local): ${dueLocal}\n` : "") +
+          `Prior nudges: ${receipt.nudge_count}\n` +
           `\nWrite the nudge.`,
+      },
+    ],
+  });
+
+  return response.content
+    .filter((b): b is Anthropic.TextBlock => b.type === "text")
+    .map((b) => b.text)
+    .join("")
+    .trim();
+}
+
+export async function writeDigest(
+  receipts: Receipt[],
+  timezone: string,
+  stats: WeeklyStats,
+): Promise<string> {
+  const lines = receipts.map((r) => {
+    const due = r.deadline ? ` (by ${formatLocal(new Date(r.deadline), timezone)})` : "";
+    return `- "${r.text}"${due}${r.reason ? ` — "${r.reason}"` : ""}`;
+  });
+
+  const response = await client.messages.create({
+    model: MODEL,
+    max_tokens: 400,
+    system:
+      `You write the morning briefing for an iMessage promise-keeper.\n` +
+      `Tone: warm, brief, a little dry. Like a friend who has the list on hand.\n` +
+      `Start with a one-line greeting tied to the day.\n` +
+      `Then list what they owe themselves today in plain language (no bullets, no markdown).\n` +
+      `End with an open-ended prompt ("anything new today?" or similar — vary it).\n` +
+      `<= 400 chars total. Reference weekly_stats only if it naturally fits.`,
+    messages: [
+      {
+        role: "user",
+        content:
+          `local_time: ${formatLocal(new Date(), timezone)}\n` +
+          `weekly_stats: ${statsBlock(stats)}\n\n` +
+          `open receipts:\n${lines.length ? lines.join("\n") : "(none)"}\n\n` +
+          `Write the briefing.`,
       },
     ],
   });

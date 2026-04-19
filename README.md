@@ -24,11 +24,13 @@ Receipts:       Pulling your receipt: "I keep putting it off and she
 
 ## What it's doing
 
-- Every incoming iMessage is run through Claude (`claude-sonnet-4-6`) with a stable cached system prompt.
-- Claude returns structured JSON: intent (`new_promise` / `status_query` / `flake` / `done` / `drop` / `smalltalk`), a reply, and — if it's a new commitment — the promise text, the reason in the user's own words, and an ISO deadline.
-- Receipts are written to a local SQLite DB.
-- A polling scheduler checks every minute for anything past due and sends a nudge that always quotes the user's original reason back to them.
-- When the user signals flaking, the agent retrieves the matching receipts and echoes the reason — no lectures, just the words they chose.
+- Every incoming iMessage runs through Claude (`claude-sonnet-4-6`). Output is structured JSON: intent (`new_promise` / `status_query` / `flake` / `done` / `drop` / `reschedule` / `smalltalk`), a reply, and — for a new commitment — the promise, the reason in the user's own words, an ISO deadline, and tags.
+- Deadlines are stored UTC, interpreted against the user's local timezone, and phrased back in local language ("Wed 4pm", not ISO strings).
+- Receipts live in local SQLite. Claude sees recent ones (open, done, dropped, nudged) every turn, so it can quote *"3rd time you've told me this one"* when the user re-promises something they flaked on.
+- A scheduler polls every 10s and fires **three tiers of nudges**: a warm L1 at the deadline, a dryer L2 if you ghost it for 20 min, and a pointed L3 that pulls the receipt after an hour of silence.
+- A **morning digest** lands at 8am local time with a roundup of what you owe yourself today.
+- Weekly keep/drop stats are fed into every reply — Claude drops them in naturally when it fits ("you've kept 3 in a row, don't break it now").
+- **Reschedule** is a first-class intent: "push the gym thing to Friday" reopens the receipt with a new deadline instead of creating a dupe.
 
 ## Setup
 
@@ -81,7 +83,11 @@ you> .quit
 
 - `ANTHROPIC_API_KEY` — required
 - `RECEIPTS_DB` — SQLite path (default `./receipts.db`)
-- `RECEIPTS_OWNER_HANDLE` — if set, only messages from this handle are processed. Useful on a shared Mac.
-- `RECEIPTS_TRIGGER_PREFIX` — enables solo mode; agent only acts on messages starting with this string.
-- `RECEIPTS_NUDGE_MS` — nudge scheduler interval in ms (default 10000). Drop to 2000 for demos.
-- `RECEIPTS_CHAT_DB` — DB path for the `npm run chat` REPL (default `:memory:`).
+- `RECEIPTS_OWNER_HANDLE` — if set, only messages from this handle are processed
+- `RECEIPTS_TRIGGER_PREFIX` — enables solo mode; agent only acts on messages starting with this string
+- `RECEIPTS_NUDGE_MS` — scheduler interval in ms (default 10000)
+- `RECEIPTS_TIMEZONE` — IANA tz for interpreting "4pm tomorrow" (default: system)
+- `RECEIPTS_ESCALATE_STEP2_MS` / `RECEIPTS_ESCALATE_STEP3_MS` — L2/L3 nudge gaps (default 20 min / 60 min; drop to 30000 / 90000 for demos)
+- `RECEIPTS_DIGEST_ENABLED` — morning digest on/off (default `true`)
+- `RECEIPTS_DIGEST_HOUR` — local hour 0–23 for the digest (default `8`)
+- `RECEIPTS_CHAT_DB` — DB path for `npm run chat` (default `:memory:`)

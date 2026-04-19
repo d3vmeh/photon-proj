@@ -6,6 +6,7 @@ import {
   findRelevant,
   updateStatus,
   rescheduleReceipt,
+  weeklyStats,
   type Receipt,
 } from "./db.js";
 import { decide } from "./claude.js";
@@ -23,6 +24,10 @@ const NUDGE_INTERVAL_MS = Number(process.env.RECEIPTS_NUDGE_MS || 10_000);
 const TIMEZONE =
   (process.env.RECEIPTS_TIMEZONE || "").trim() ||
   Intl.DateTimeFormat().resolvedOptions().timeZone;
+const STEP2_MS = Number(process.env.RECEIPTS_ESCALATE_STEP2_MS || 20 * 60 * 1000);
+const STEP3_MS = Number(process.env.RECEIPTS_ESCALATE_STEP3_MS || 60 * 60 * 1000);
+const DIGEST_ENABLED = (process.env.RECEIPTS_DIGEST_ENABLED || "true").toLowerCase() !== "false";
+const DIGEST_HOUR = Number(process.env.RECEIPTS_DIGEST_HOUR || 8);
 
 const db = openDb();
 const sdk = new IMessageSDK({
@@ -76,6 +81,7 @@ async function handle(msg: Message) {
       now: new Date(),
       timezone: TIMEZONE,
       context,
+      stats: weeklyStats(db, msg.sender),
     });
   } catch (err) {
     console.error("[receipts] claude failed:", err);
@@ -143,8 +149,12 @@ async function main() {
     async (to, body) => {
       await sdk.send(to, body);
     },
-    NUDGE_INTERVAL_MS,
-    TIMEZONE,
+    {
+      intervalMs: NUDGE_INTERVAL_MS,
+      timezone: TIMEZONE,
+      escalation: { step2Ms: STEP2_MS, step3Ms: STEP3_MS },
+      digest: { enabled: DIGEST_ENABLED, hourLocal: DIGEST_HOUR },
+    },
   );
 
   await sdk.startWatching({
@@ -162,6 +172,12 @@ async function main() {
   if (OWNER) console.log(`[receipts] accepting messages from ${OWNER} only.`);
   console.log(`[receipts] timezone: ${TIMEZONE}`);
   console.log(`[receipts] nudge scheduler ticking every ${NUDGE_INTERVAL_MS / 1000}s.`);
+  console.log(
+    `[receipts] escalation: L2 after ${(STEP2_MS / 60000).toFixed(1)}m silent, L3 after ${(STEP3_MS / 60000).toFixed(1)}m.`,
+  );
+  if (DIGEST_ENABLED) {
+    console.log(`[receipts] morning digest: ${String(DIGEST_HOUR).padStart(2, "0")}:00 ${TIMEZONE}`);
+  }
 
   const shutdown = async () => {
     console.log("\n[receipts] shutting down...");

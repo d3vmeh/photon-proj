@@ -9,9 +9,11 @@ import {
   rescheduleReceipt,
   dueReceipts,
   markNudged,
+  weeklyStats,
+  openForHandle,
   type Receipt,
 } from "./db.js";
-import { decide, nudge } from "./claude.js";
+import { decide, nudge, writeDigest } from "./claude.js";
 
 if (!process.env.ANTHROPIC_API_KEY) {
   console.error("ANTHROPIC_API_KEY is not set.");
@@ -61,18 +63,36 @@ async function fireDue() {
     return;
   }
   for (const r of due) {
-    const text = await nudge(r, TIMEZONE);
-    markNudged(db, r.id);
-    console.log(`  nudge #${r.id} → ${text}`);
+    const level = Math.min(3, r.nudge_count + 1) as 1 | 2 | 3;
+    const text = await nudge(r, TIMEZONE, level);
+    markNudged(db, r.id, level);
+    console.log(`  L${level} nudge #${r.id} → ${text}`);
   }
   console.log();
+}
+
+async function showDigest() {
+  const open = openForHandle(db, HANDLE);
+  if (open.length === 0) {
+    console.log("  (no open receipts — nothing to brief on)\n");
+    return;
+  }
+  const text = await writeDigest(open, TIMEZONE, weeklyStats(db, HANDLE));
+  console.log(`  morning digest → ${text}\n`);
+}
+
+function showStats() {
+  const s = weeklyStats(db, HANDLE);
+  console.log(`  7-day: kept=${s.kept} dropped=${s.dropped} open=${s.open} total=${s.total_made}\n`);
 }
 
 const HELP = `
 commands:
   .help        show this
   .list        show all receipts
+  .stats       show 7-day keep/drop stats
   .due         force-fire any overdue nudges (skips the wait)
+  .digest      generate the morning digest now (skips the clock)
   .quit        exit (also Ctrl-D)
   anything else is treated as an incoming iMessage.
 `;
@@ -93,7 +113,9 @@ async function main() {
     if (trimmed === ".quit" || trimmed === ".exit") break;
     if (trimmed === ".help") { console.log(HELP); continue; }
     if (trimmed === ".list") { printList(); continue; }
+    if (trimmed === ".stats") { showStats(); continue; }
     if (trimmed === ".due") { await fireDue(); continue; }
+    if (trimmed === ".digest") { await showDigest(); continue; }
 
     let d;
     try {
@@ -103,6 +125,7 @@ async function main() {
         now: new Date(),
         timezone: TIMEZONE,
         context: context(trimmed),
+        stats: weeklyStats(db, HANDLE),
       });
     } catch (err) {
       console.error("claude error:", err);
