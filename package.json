@@ -4,11 +4,11 @@
   "description": "iMessage-native promise-keeper agent. Text it your promises; it quotes you back when you're tempted to flake.",
   "type": "module",
   "private": true,
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=20.6" },
   "scripts": {
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
-    "init-db": "tsx src/init-db.ts"
+    "start": "node --env-file-if-exists=.env --import tsx src/index.ts",
+    "dev": "node --env-file-if-exists=.env --import tsx --watch src/index.ts",
+    "init-db": "node --env-file-if-exists=.env --import tsx src/init-db.ts"
   },
   "dependencies": {
     "@photon-ai/imessage-kit": "^2.1.2",

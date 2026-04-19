@@ -1,8 +1,44 @@
+# deps / build
 node_modules/
+dist/
+build/
+*.tsbuildinfo
+
+# env & secrets
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+*.crt
+secrets*
+*.secret
+
+# local data — receipts.db contains real iMessage content + promises
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
-dist/
+*.sqlite
+*.sqlite3
+data/
+
+# logs (may contain message text)
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# editors / OS
 .DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# coverage / tests
+coverage/
+.nyc_output/
