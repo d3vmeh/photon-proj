@@ -66,9 +66,10 @@ async function fireNudges(db: DB, send: Sender, cfg: SchedulerConfig) {
 async function maybeFireDigest(db: DB, send: Sender, cfg: SchedulerConfig) {
   const now = new Date();
   const local = localParts(now, cfg.timezone);
-  if (local.hour !== cfg.digest.hourLocal) return;
-  // minute window: only fire in the first tick of that hour
-  // — cheap de-dupe per local date.
+  // Catch-up semantics: fire once we're at or past the configured hour, as long
+  // as we haven't already sent today's digest. Lets a restart after the target
+  // time still deliver the day's briefing.
+  if (local.hour < cfg.digest.hourLocal) return;
 
   const dateKey = `${local.year}-${String(local.month).padStart(2, "0")}-${String(local.day).padStart(2, "0")}`;
 
