@@ -1,0 +1,139 @@
+import { IMessageSDK, loggerPlugin, type Message } from "@photon-ai/imessage-kit";
+import {
+  openDb,
+  addReceipt,
+  listOpen,
+  findRelevant,
+  updateStatus,
+  type Receipt,
+} from "./db.js";
+import { decide } from "./claude.js";
+import { startScheduler } from "./scheduler.js";
+
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and fill it in.");
+  process.exit(1);
+}
+
+const db = openDb();
+const sdk = new IMessageSDK({
+  plugins: [loggerPlugin({ level: "info" })],
+  watcher: { pollInterval: 2000, excludeOwnMessages: true },
+});
+
+const OWNER = (process.env.RECEIPTS_OWNER_HANDLE || "").trim();
+
+function isOwner(sender: string): boolean {
+  if (!OWNER) return true;
+  return normalize(sender) === normalize(OWNER);
+}
+
+function normalize(handle: string): string {
+  return handle.replace(/[\s\-()]/g, "").toLowerCase();
+}
+
+async function handle(msg: Message) {
+  if (msg.isReaction || msg.isFromMe || !msg.text) return;
+  if (msg.isGroupChat) return;
+  if (!isOwner(msg.sender)) {
+    console.log(`[receipts] ignoring non-owner: ${msg.sender}`);
+    return;
+  }
+
+  const text = msg.text.trim();
+  if (!text) return;
+
+  const context = gatherContext(msg.sender, text);
+
+  let decision;
+  try {
+    decision = await decide({
+      userText: text,
+      handle: msg.sender,
+      now: new Date(),
+      context,
+    });
+  } catch (err) {
+    console.error("[receipts] claude failed:", err);
+    await sdk.send(msg.sender, "hm, my brain glitched. try again in a sec?");
+    return;
+  }
+
+  await applyDecision(msg.sender, decision);
+
+  try {
+    await sdk.send(msg.sender, decision.reply);
+  } catch (err) {
+    console.error("[receipts] send failed:", err);
+  }
+}
+
+function gatherContext(sender: string, userText: string): Receipt[] {
+  const open = listOpen(db, sender, 10);
+  const matchedByWord = findRelevant(db, sender, userText, 5);
+  const seen = new Set<number>();
+  const merged: Receipt[] = [];
+  for (const r of [...open, ...matchedByWord]) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    merged.push(r);
+  }
+  return merged.slice(0, 15);
+}
+
+async function applyDecision(sender: string, d: Awaited<ReturnType<typeof decide>>) {
+  switch (d.intent) {
+    case "new_promise":
+      if (d.promise) {
+        const saved = addReceipt(db, {
+          handle: sender,
+          text: d.promise.text,
+          reason: d.promise.reason,
+          deadline: d.promise.deadline_iso,
+          tags: d.promise.tags,
+        });
+        console.log(`[receipts] saved #${saved.id}: "${saved.text}"`);
+      }
+      break;
+    case "done":
+      for (const id of d.refs) updateStatus(db, id, "done");
+      break;
+    case "drop":
+      for (const id of d.refs) updateStatus(db, id, "dropped");
+      break;
+    case "flake":
+    case "status_query":
+    case "smalltalk":
+      break;
+  }
+}
+
+async function main() {
+  const stopScheduler = startScheduler(db, async (to, body) => {
+    await sdk.send(to, body);
+  });
+
+  await sdk.startWatching({
+    onDirectMessage: handle,
+    onError: (err) => console.error("[receipts] watcher error:", err),
+  });
+
+  console.log("[receipts] up. text the Mac's iMessage account to make a promise.");
+  if (OWNER) console.log(`[receipts] accepting messages from ${OWNER} only.`);
+
+  const shutdown = async () => {
+    console.log("\n[receipts] shutting down...");
+    stopScheduler();
+    sdk.stopWatching();
+    await sdk.close();
+    db.close();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
+}
+
+main().catch((err) => {
+  console.error("[receipts] fatal:", err);
+  process.exit(1);
+});
