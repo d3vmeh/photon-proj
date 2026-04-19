@@ -15,13 +15,21 @@ if (!process.env.ANTHROPIC_API_KEY) {
   process.exit(1);
 }
 
+const OWNER = (process.env.RECEIPTS_OWNER_HANDLE || "").trim();
+const TRIGGER = (process.env.RECEIPTS_TRIGGER_PREFIX || "").trim();
+const SOLO = TRIGGER.length > 0;
+const NUDGE_INTERVAL_MS = Number(process.env.RECEIPTS_NUDGE_MS || 10_000);
+
 const db = openDb();
 const sdk = new IMessageSDK({
   plugins: [loggerPlugin({ level: "info" })],
-  watcher: { pollInterval: 2000, excludeOwnMessages: true },
+  watcher: {
+    pollInterval: 2000,
+    // In solo mode we accept our own texts (iPhone→same Apple ID→Mac),
+    // but we only ACT on messages starting with the trigger prefix.
+    excludeOwnMessages: !SOLO,
+  },
 });
-
-const OWNER = (process.env.RECEIPTS_OWNER_HANDLE || "").trim();
 
 function isOwner(sender: string): boolean {
   if (!OWNER) return true;
@@ -33,15 +41,26 @@ function normalize(handle: string): string {
 }
 
 async function handle(msg: Message) {
-  if (msg.isReaction || msg.isFromMe || !msg.text) return;
+  if (msg.isReaction || !msg.text) return;
   if (msg.isGroupChat) return;
+
+  const raw = msg.text.trim();
+  if (!raw) return;
+
+  let text: string;
+  if (SOLO) {
+    if (!raw.startsWith(TRIGGER)) return;
+    text = raw.slice(TRIGGER.length).trim();
+    if (!text) return;
+  } else {
+    if (msg.isFromMe) return;
+    text = raw;
+  }
+
   if (!isOwner(msg.sender)) {
     console.log(`[receipts] ignoring non-owner: ${msg.sender}`);
     return;
   }
-
-  const text = msg.text.trim();
-  if (!text) return;
 
   const context = gatherContext(msg.sender, text);
 
@@ -109,17 +128,28 @@ async function applyDecision(sender: string, d: Awaited<ReturnType<typeof decide
 }
 
 async function main() {
-  const stopScheduler = startScheduler(db, async (to, body) => {
-    await sdk.send(to, body);
-  });
+  const stopScheduler = startScheduler(
+    db,
+    async (to, body) => {
+      await sdk.send(to, body);
+    },
+    NUDGE_INTERVAL_MS,
+  );
 
   await sdk.startWatching({
     onDirectMessage: handle,
     onError: (err) => console.error("[receipts] watcher error:", err),
   });
 
-  console.log("[receipts] up. text the Mac's iMessage account to make a promise.");
+  console.log("[receipts] up.");
+  if (SOLO) {
+    console.log(`[receipts] SOLO MODE: only processing messages starting with "${TRIGGER}".`);
+    console.log(`[receipts]   (text yourself from iPhone: "${TRIGGER} gonna stretch in 3 min bc my back hurts")`);
+  } else {
+    console.log("[receipts] text the Mac's iMessage account from another device to make a promise.");
+  }
   if (OWNER) console.log(`[receipts] accepting messages from ${OWNER} only.`);
+  console.log(`[receipts] nudge scheduler ticking every ${NUDGE_INTERVAL_MS / 1000}s.`);
 
   const shutdown = async () => {
     console.log("\n[receipts] shutting down...");

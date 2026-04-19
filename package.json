@@ -8,6 +8,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env --import tsx src/index.ts",
     "dev": "node --env-file-if-exists=.env --import tsx --watch src/index.ts",
+    "chat": "node --env-file-if-exists=.env --import tsx src/chat.ts",
     "init-db": "node --env-file-if-exists=.env --import tsx src/init-db.ts"
   },
   "dependencies": {

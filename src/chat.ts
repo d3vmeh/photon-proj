@@ -1,0 +1,134 @@
+import readline from "node:readline/promises";
+import { stdin as input, stdout as output } from "node:process";
+import {
+  openDb,
+  addReceipt,
+  listOpen,
+  findRelevant,
+  updateStatus,
+  dueReceipts,
+  markNudged,
+  type Receipt,
+} from "./db.js";
+import { decide, nudge } from "./claude.js";
+
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error("ANTHROPIC_API_KEY is not set.");
+  process.exit(1);
+}
+
+const HANDLE = "+15550000REPL";
+const DB_PATH = process.env.RECEIPTS_CHAT_DB || ":memory:";
+const db = openDb(DB_PATH);
+
+function context(text: string): Receipt[] {
+  const open = listOpen(db, HANDLE, 10);
+  const rel = findRelevant(db, HANDLE, text, 5);
+  const seen = new Set<number>();
+  const merged: Receipt[] = [];
+  for (const r of [...open, ...rel]) {
+    if (seen.has(r.id)) continue;
+    seen.add(r.id);
+    merged.push(r);
+  }
+  return merged.slice(0, 15);
+}
+
+function printList() {
+  const rows = db
+    .prepare(`SELECT * FROM receipts WHERE handle = ? ORDER BY id DESC`)
+    .all(HANDLE) as Receipt[];
+  if (rows.length === 0) {
+    console.log("  (no receipts yet)\n");
+    return;
+  }
+  for (const r of rows) {
+    const due = r.deadline ? ` due ${r.deadline}` : "";
+    const reason = r.reason ? ` — "${r.reason}"` : "";
+    console.log(`  #${r.id} [${r.status}] "${r.text}"${reason}${due}`);
+  }
+  console.log();
+}
+
+async function fireDue() {
+  const due = dueReceipts(db);
+  if (due.length === 0) {
+    console.log("  (nothing overdue)\n");
+    return;
+  }
+  for (const r of due) {
+    const text = await nudge(r);
+    markNudged(db, r.id);
+    console.log(`  nudge #${r.id} → ${text}`);
+  }
+  console.log();
+}
+
+const HELP = `
+commands:
+  .help        show this
+  .list        show all receipts
+  .due         force-fire any overdue nudges (skips the wait)
+  .quit        exit (also Ctrl-D)
+  anything else is treated as an incoming iMessage.
+`;
+
+async function main() {
+  const rl = readline.createInterface({ input, output });
+  console.log(`receipts chat REPL. db: ${DB_PATH}. type .help for commands.`);
+
+  while (true) {
+    let line: string;
+    try {
+      line = await rl.question("you> ");
+    } catch {
+      break;
+    }
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed === ".quit" || trimmed === ".exit") break;
+    if (trimmed === ".help") { console.log(HELP); continue; }
+    if (trimmed === ".list") { printList(); continue; }
+    if (trimmed === ".due") { await fireDue(); continue; }
+
+    let d;
+    try {
+      d = await decide({
+        userText: trimmed,
+        handle: HANDLE,
+        now: new Date(),
+        context: context(trimmed),
+      });
+    } catch (err) {
+      console.error("claude error:", err);
+      continue;
+    }
+
+    if (d.intent === "new_promise" && d.promise) {
+      const saved = addReceipt(db, {
+        handle: HANDLE,
+        text: d.promise.text,
+        reason: d.promise.reason,
+        deadline: d.promise.deadline_iso,
+        tags: d.promise.tags,
+      });
+      console.log(`(saved #${saved.id}${saved.deadline ? `, due ${saved.deadline}` : ""})`);
+    }
+    if (d.intent === "done") d.refs.forEach((id) => updateStatus(db, id, "done"));
+    if (d.intent === "drop") d.refs.forEach((id) => updateStatus(db, id, "dropped"));
+
+    console.log(`bot> ${d.reply}`);
+    const meta = [`intent:${d.intent}`];
+    if (d.refs.length) meta.push(`refs:${d.refs.join(",")}`);
+    console.log(`[${meta.join(" ")}]\n`);
+  }
+
+  rl.close();
+  db.close();
+  console.log("bye.");
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});

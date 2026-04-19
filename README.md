@@ -53,8 +53,33 @@ for Messages. Then text the Mac's iMessage account from your phone.
 | `src/db.ts` | SQLite schema + helpers for `receipts` |
 | `src/scheduler.ts` | 60s polling loop for due receipts |
 
+## Testing without a second device
+
+Two options:
+
+**1. Terminal REPL** — `npm run chat` opens a prompt that pipes your typed lines through the same Claude + DB pipeline as iMessage. Defaults to an in-memory DB so your real receipts aren't touched; set `RECEIPTS_CHAT_DB=./chat.db` to persist.
+
+```
+$ npm run chat
+you> gonna stretch in 3 min bc my back is wrecked
+(saved #1, due 2026-04-19T22:14:00.000Z)
+bot> Locked in. I'll nudge you in 3.
+[intent:new_promise]
+
+you> .list
+  #1 [open] "stretch for 10 min" — "my back is wrecked" due 2026-04-19T22:14:00.000Z
+
+you> .due      # force-fire any overdue nudges
+you> .quit
+```
+
+**2. Solo iMessage mode** — text your *own* email/number from your iPhone. Set `RECEIPTS_TRIGGER_PREFIX=/r` in `.env`; the agent will only act on messages starting with that prefix, and its own replies (which don't have the prefix) won't loop. Example from your iPhone: `/r gonna stretch in 3 min bc my back hurts`.
+
 ## Knobs
 
 - `ANTHROPIC_API_KEY` — required
 - `RECEIPTS_DB` — SQLite path (default `./receipts.db`)
 - `RECEIPTS_OWNER_HANDLE` — if set, only messages from this handle are processed. Useful on a shared Mac.
+- `RECEIPTS_TRIGGER_PREFIX` — enables solo mode; agent only acts on messages starting with this string.
+- `RECEIPTS_NUDGE_MS` — nudge scheduler interval in ms (default 10000). Drop to 2000 for demos.
+- `RECEIPTS_CHAT_DB` — DB path for the `npm run chat` REPL (default `:memory:`).
