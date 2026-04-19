@@ -16,7 +16,7 @@ who happens to remember everything, not a productivity bot.
 You always respond with JSON matching this exact shape:
 
 {
-  "intent": "new_promise" | "status_query" | "flake" | "done" | "drop" | "smalltalk",
+  "intent": "new_promise" | "status_query" | "flake" | "done" | "drop" | "reschedule" | "smalltalk",
   "reply": "<short SMS-friendly reply, <= 280 chars, no markdown>",
   "promise": {
     "text": "<the commitment, first-person, <= 140 chars>",
@@ -24,20 +24,35 @@ You always respond with JSON matching this exact shape:
     "deadline_iso": "<ISO 8601 UTC, or null if none>",
     "tags": "<comma-separated short tags, or null>"
   } | null,
+  "new_deadline_iso": "<ISO 8601 UTC, only when intent is reschedule, else null>",
   "refs": [<integer receipt ids this reply is about, or empty>]
 }
 
 Intent rules:
-- "new_promise": they just committed to something. Fill "promise". Reply should confirm and promise to nudge.
-- "status_query": they're asking what's open / what they said about X. Use the context receipts; "promise" null; "refs" list the ids you cited.
+- "new_promise": they just committed to something. Fill "promise". Reply should confirm and mention when you'll check in.
+- "status_query": they're asking what's open / what they said about X. Use the context receipts; "promise" null; "refs" cites the ids.
 - "flake": they're signaling they won't do a past promise ("skipped", "can't", "nah"). Quote the stored reason back, gently. "promise" null.
 - "done": they completed something. "refs" cites the receipt(s) to close.
-- "drop": they want to let a promise go. "refs" cites receipt(s) to drop.
+- "drop": they want to let a promise go for good. "refs" cites receipt(s).
+- "reschedule": they want to push a promise to a new time ("tomorrow instead", "next week"). "refs" cites the receipt(s); "new_deadline_iso" is the new deadline.
 - "smalltalk": greetings / ambiguous. Reply briefly, "promise" null.
 
-Deadlines: interpret relative times against the "now" given in the user turn.
-If no deadline is stated, set deadline_iso to null — do NOT invent one.
-Never assume a promise is flaking unless the user says so. Never invent receipts.`;
+Timezone handling:
+- The user turn will specify a "now" (UTC) and a "timezone" (IANA, e.g. America/New_York).
+- Interpret relative times ("tomorrow 4pm", "in 30 min") against the user's timezone, not UTC.
+- ALWAYS return deadlines in ISO 8601 UTC (ending in Z).
+- In replies, refer to times in the user's LOCAL phrasing ("Wed 4pm", "in 20 min"), never raw ISO strings.
+- Never invent a deadline when none was stated.
+
+Memory / streak awareness:
+- recent_receipts may contain prior promises — including ones that were dropped, nudged but not closed, or done.
+- When a NEW promise rhymes with a past one the user DROPPED or never closed out, gently name it.
+  Example reply: "3rd time you've told me this one. want me to actually hold you this time, or are we pretending again?"
+- When a new promise matches one they DID close, a light callback is nice: "last time you actually did it — let's repeat."
+- Never fabricate history. Only reference receipts that appear in recent_receipts.
+- Never be preachy or shame-y. Dry > moralistic.
+
+Never invent receipts. Never assume a promise is flaking unless the user says so.`;
 
 export type ExtractedPromise = {
   text: string;
@@ -47,9 +62,17 @@ export type ExtractedPromise = {
 };
 
 export type Decision = {
-  intent: "new_promise" | "status_query" | "flake" | "done" | "drop" | "smalltalk";
+  intent:
+    | "new_promise"
+    | "status_query"
+    | "flake"
+    | "done"
+    | "drop"
+    | "reschedule"
+    | "smalltalk";
   reply: string;
   promise: ExtractedPromise | null;
+  new_deadline_iso: string | null;
   refs: number[];
 };
 
@@ -70,9 +93,10 @@ export async function decide(opts: {
   userText: string;
   handle: string;
   now: Date;
+  timezone: string;
   context: Receipt[];
 }): Promise<Decision> {
-  const { userText, handle, now, context } = opts;
+  const { userText, handle, now, timezone, context } = opts;
 
   const response = await client.messages.create({
     model: MODEL,
@@ -82,7 +106,9 @@ export async function decide(opts: {
       {
         role: "user",
         content:
-          `now: ${now.toISOString()}\n` +
+          `now_utc: ${now.toISOString()}\n` +
+          `timezone: ${timezone}\n` +
+          `local_time: ${formatLocal(now, timezone)}\n` +
           `from_handle: ${handle}\n` +
           `recent_receipts:\n${contextBlock(context)}\n\n` +
           `message:\n${userText}\n\n` +
@@ -99,16 +125,22 @@ export async function decide(opts: {
 
   const json = stripFences(raw);
   try {
-    const parsed = JSON.parse(json) as Decision;
+    const parsed = JSON.parse(json) as Partial<Decision>;
     if (!parsed.reply) throw new Error("missing reply");
-    parsed.refs = parsed.refs ?? [];
-    return parsed;
+    return {
+      intent: parsed.intent ?? "smalltalk",
+      reply: parsed.reply,
+      promise: parsed.promise ?? null,
+      new_deadline_iso: parsed.new_deadline_iso ?? null,
+      refs: parsed.refs ?? [],
+    };
   } catch (err) {
     console.error("[claude] parse failure:", err, "raw:", raw);
     return {
       intent: "smalltalk",
       reply: "hm, got tangled up there. mind saying that again?",
       promise: null,
+      new_deadline_iso: null,
       refs: [],
     };
   }
@@ -119,21 +151,42 @@ function stripFences(s: string): string {
   return fenced ? fenced[1].trim() : s;
 }
 
-export async function nudge(receipt: Receipt): Promise<string> {
+function formatLocal(d: Date, tz: string): string {
+  try {
+    return new Intl.DateTimeFormat("en-US", {
+      timeZone: tz,
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    }).format(d);
+  } catch {
+    return d.toISOString();
+  }
+}
+
+export async function nudge(receipt: Receipt, timezone: string): Promise<string> {
+  const dueLocal = receipt.deadline
+    ? formatLocal(new Date(receipt.deadline), timezone)
+    : null;
+
   const response = await client.messages.create({
     model: MODEL,
     max_tokens: 200,
     system:
       `You write one-line iMessage nudges for promises people made to themselves.\n` +
       `Style: warm, brief, a touch dry. No emojis unless the original text had them. <= 200 chars. No markdown.\n` +
-      `Always quote the user's own reason verbatim in quotes when one exists.`,
+      `Always quote the user's own reason verbatim in quotes when one exists.\n` +
+      `Refer to times in the user's local phrasing ("4pm", "now"), never raw ISO strings.`,
     messages: [
       {
         role: "user",
         content:
           `Promise: "${receipt.text}"\n` +
           (receipt.reason ? `Their reason: "${receipt.reason}"\n` : "") +
-          (receipt.deadline ? `Due: ${receipt.deadline}\n` : "") +
+          (dueLocal ? `Due (local): ${dueLocal}\n` : "") +
           `\nWrite the nudge.`,
       },
     ],

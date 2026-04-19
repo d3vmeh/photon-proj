@@ -85,6 +85,14 @@ export function updateStatus(db: DB, id: number, status: Receipt["status"]) {
   db.prepare(`UPDATE receipts SET status = ? WHERE id = ?`).run(status, id);
 }
 
+export function rescheduleReceipt(db: DB, id: number, newDeadlineIso: string | null) {
+  db.prepare(
+    `UPDATE receipts
+     SET deadline = ?, status = 'open', nudged_at = NULL
+     WHERE id = ?`,
+  ).run(newDeadlineIso, id);
+}
+
 export function markNudged(db: DB, id: number) {
   db.prepare(
     `UPDATE receipts SET status = 'nudged', nudged_at = datetime('now') WHERE id = ?`,

@@ -3,7 +3,12 @@ import { nudge } from "./claude.js";
 
 export type Sender = (handle: string, text: string) => Promise<void>;
 
-export function startScheduler(db: DB, send: Sender, intervalMs = 60_000) {
+export function startScheduler(
+  db: DB,
+  send: Sender,
+  intervalMs = 60_000,
+  timezone: string = Intl.DateTimeFormat().resolvedOptions().timeZone,
+) {
   let running = false;
 
   const tick = async () => {
@@ -13,7 +18,7 @@ export function startScheduler(db: DB, send: Sender, intervalMs = 60_000) {
       const due = dueReceipts(db);
       for (const r of due) {
         try {
-          const text = await nudge(r);
+          const text = await nudge(r, timezone);
           await send(r.handle, text);
           markNudged(db, r.id);
         } catch (err) {

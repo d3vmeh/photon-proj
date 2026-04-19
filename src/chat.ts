@@ -6,6 +6,7 @@ import {
   listOpen,
   findRelevant,
   updateStatus,
+  rescheduleReceipt,
   dueReceipts,
   markNudged,
   type Receipt,
@@ -19,6 +20,9 @@ if (!process.env.ANTHROPIC_API_KEY) {
 
 const HANDLE = "+15550000REPL";
 const DB_PATH = process.env.RECEIPTS_CHAT_DB || ":memory:";
+const TIMEZONE =
+  (process.env.RECEIPTS_TIMEZONE || "").trim() ||
+  Intl.DateTimeFormat().resolvedOptions().timeZone;
 const db = openDb(DB_PATH);
 
 function context(text: string): Receipt[] {
@@ -57,7 +61,7 @@ async function fireDue() {
     return;
   }
   for (const r of due) {
-    const text = await nudge(r);
+    const text = await nudge(r, TIMEZONE);
     markNudged(db, r.id);
     console.log(`  nudge #${r.id} → ${text}`);
   }
@@ -97,6 +101,7 @@ async function main() {
         userText: trimmed,
         handle: HANDLE,
         now: new Date(),
+        timezone: TIMEZONE,
         context: context(trimmed),
       });
     } catch (err) {
@@ -116,6 +121,10 @@ async function main() {
     }
     if (d.intent === "done") d.refs.forEach((id) => updateStatus(db, id, "done"));
     if (d.intent === "drop") d.refs.forEach((id) => updateStatus(db, id, "dropped"));
+    if (d.intent === "reschedule" && d.new_deadline_iso) {
+      d.refs.forEach((id) => rescheduleReceipt(db, id, d.new_deadline_iso!));
+      console.log(`(rescheduled ${d.refs.join(",")} → ${d.new_deadline_iso})`);
+    }
 
     console.log(`bot> ${d.reply}`);
     const meta = [`intent:${d.intent}`];

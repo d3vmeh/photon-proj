@@ -5,6 +5,7 @@ import {
   listOpen,
   findRelevant,
   updateStatus,
+  rescheduleReceipt,
   type Receipt,
 } from "./db.js";
 import { decide } from "./claude.js";
@@ -19,6 +20,9 @@ const OWNER = (process.env.RECEIPTS_OWNER_HANDLE || "").trim();
 const TRIGGER = (process.env.RECEIPTS_TRIGGER_PREFIX || "").trim();
 const SOLO = TRIGGER.length > 0;
 const NUDGE_INTERVAL_MS = Number(process.env.RECEIPTS_NUDGE_MS || 10_000);
+const TIMEZONE =
+  (process.env.RECEIPTS_TIMEZONE || "").trim() ||
+  Intl.DateTimeFormat().resolvedOptions().timeZone;
 
 const db = openDb();
 const sdk = new IMessageSDK({
@@ -70,6 +74,7 @@ async function handle(msg: Message) {
       userText: text,
       handle: msg.sender,
       now: new Date(),
+      timezone: TIMEZONE,
       context,
     });
   } catch (err) {
@@ -120,6 +125,11 @@ async function applyDecision(sender: string, d: Awaited<ReturnType<typeof decide
     case "drop":
       for (const id of d.refs) updateStatus(db, id, "dropped");
       break;
+    case "reschedule":
+      if (d.new_deadline_iso) {
+        for (const id of d.refs) rescheduleReceipt(db, id, d.new_deadline_iso);
+      }
+      break;
     case "flake":
     case "status_query":
     case "smalltalk":
@@ -134,6 +144,7 @@ async function main() {
       await sdk.send(to, body);
     },
     NUDGE_INTERVAL_MS,
+    TIMEZONE,
   );
 
   await sdk.startWatching({
@@ -149,6 +160,7 @@ async function main() {
     console.log("[receipts] text the Mac's iMessage account from another device to make a promise.");
   }
   if (OWNER) console.log(`[receipts] accepting messages from ${OWNER} only.`);
+  console.log(`[receipts] timezone: ${TIMEZONE}`);
   console.log(`[receipts] nudge scheduler ticking every ${NUDGE_INTERVAL_MS / 1000}s.`);
 
   const shutdown = async () => {
