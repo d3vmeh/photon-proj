@@ -7,7 +7,7 @@ export type Receipt = {
   reason: string | null;
   deadline: string | null;
   tags: string | null;
-  status: "open" | "done" | "dropped" | "nudged";
+  status: "open" | "done" | "dropped" | "nudged" | "draft";
   created_at: string;
   nudged_at: string | null;
   nudge_count: number;
@@ -77,11 +77,48 @@ export function listOpen(db: DB, handle: string, limit = 20): Receipt[] {
   return db
     .prepare(
       `SELECT * FROM receipts
-       WHERE handle = ? AND status IN ('open','nudged')
+       WHERE handle = ? AND status IN ('open','nudged','draft')
        ORDER BY COALESCE(deadline, '9999') ASC, created_at ASC
        LIMIT ?`,
     )
     .all(handle, limit) as Receipt[];
+}
+
+export function latestDraft(db: DB, handle: string): Receipt | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM receipts
+       WHERE handle = ? AND status = 'draft'
+       ORDER BY created_at DESC
+       LIMIT 1`,
+    )
+    .get(handle) as Receipt | undefined;
+  return row ?? null;
+}
+
+export function completeDraft(
+  db: DB,
+  id: number,
+  reason: string,
+  opts: { deadline?: string | null; tags?: string | null; text?: string | null } = {},
+) {
+  const row = db.prepare(`SELECT * FROM receipts WHERE id = ?`).get(id) as Receipt | undefined;
+  if (!row) return;
+  db.prepare(
+    `UPDATE receipts
+     SET reason = ?,
+         status = 'open',
+         deadline = COALESCE(?, deadline),
+         tags = COALESCE(?, tags),
+         text = COALESCE(?, text)
+     WHERE id = ?`,
+  ).run(
+    reason,
+    opts.deadline ?? null,
+    opts.tags ?? null,
+    opts.text ?? null,
+    id,
+  );
 }
 
 export function findRelevant(db: DB, handle: string, query: string, limit = 5): Receipt[] {

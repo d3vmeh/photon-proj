@@ -22,15 +22,14 @@ Receipts:       Pulling your receipt: "I keep putting it off and she
                 no = let it go)
 ```
 
-## What it's doing
+## Notable features
 
-- Every incoming iMessage runs through Claude (`claude-sonnet-4-6`). Output is structured JSON: intent (`new_promise` / `status_query` / `flake` / `done` / `drop` / `reschedule` / `smalltalk`), a reply, and — for a new commitment — the promise, the reason in the user's own words, an ISO deadline, and tags.
-- Deadlines are stored UTC, interpreted against the user's local timezone, and phrased back in local language ("Wed 4pm", not ISO strings).
-- Receipts live in local SQLite. Claude sees recent ones (open, done, dropped, nudged) every turn, so it can quote *"3rd time you've told me this one"* when the user re-promises something they flaked on.
-- A scheduler polls every 10s and fires **three tiers of nudges**: a warm L1 at the deadline, a dryer L2 if you ghost it for 20 min, and a pointed L3 that pulls the receipt after an hour of silence.
-- A **morning digest** lands at 8am local time with a roundup of what you owe yourself today.
-- Weekly keep/drop stats are fed into every reply — Claude drops them in naturally when it fits ("you've kept 3 in a row, don't break it now").
-- **Reschedule** is a first-class intent: "push the gym thing to Friday" reopens the receipt with a new deadline instead of creating a dupe.
+- **it wants to know the *why***: give a reason for your promise. The agent will ask *"what's pulling you toward this?"*
+- **3-tier escalating nudges**: basic lvl 1 at the deadline, dry lvl 2 after 20 min of silence, directed lvl 3 after an hour that quotes your own words at you
+- **Morning digest**: 8am local every day, a one-line roundup of what you said you would do
+- **Repeated promises/giving up**: the agent sees your past promises (kept, dropped, flaked) on every turn, so the third time you re-promise something you dropped it'll notice.
+- **Weekly stats/streaks**: keep/drop ratio is fed into every reply and dropped in when it fits (something like "you've kept 3 in a row, don't break it now").
+- **Reschedule as a first-class verb**:"push the gym thing to Friday" updates the receipt instead of creating a dupe.
 
 ## Setup
 
@@ -53,9 +52,11 @@ for Messages. Then text the Mac's iMessage account from your phone.
 | File | What it does |
 |---|---|
 | `src/index.ts` | Main loop: subscribes to iMessages, routes to Claude, persists, replies |
-| `src/claude.ts` | Intent classifier + nudge writer (Anthropic SDK, prompt-cached system prompt) |
-| `src/db.ts` | SQLite schema + helpers for `receipts` |
-| `src/scheduler.ts` | 60s polling loop for due receipts |
+| `src/claude.ts` | Intent classifier + nudge writer + digest writer |
+| `src/db.ts` | SQLite schema + helpers for `receipts` + drafts + kv |
+| `src/scheduler.ts` | Polling loop: due nudges, escalations, morning digest |
+| `src/chat.ts` | `npm run chat` — terminal REPL for iterating without iMessage |
+| `src/inspect.ts` | `npm run inspect` — readable snapshot of the DB |
 
 ## Testing without a second device
 

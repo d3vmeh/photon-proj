@@ -7,6 +7,7 @@ import {
   findRelevant,
   updateStatus,
   rescheduleReceipt,
+  completeDraft,
   dueReceipts,
   markNudged,
   weeklyStats,
@@ -141,6 +142,29 @@ async function main() {
         tags: d.promise.tags,
       });
       console.log(`(saved #${saved.id}${saved.deadline ? `, due ${saved.deadline}` : ""})`);
+    }
+    if (d.intent === "ask_reason" && d.promise) {
+      const draft = addReceipt(db, {
+        handle: HANDLE,
+        text: d.promise.text,
+        reason: null,
+        deadline: d.promise.deadline_iso,
+        tags: d.promise.tags,
+      });
+      db.prepare(`UPDATE receipts SET status = 'draft' WHERE id = ?`).run(draft.id);
+      console.log(`(draft #${draft.id} awaiting reason)`);
+    }
+    if (d.intent === "complete_draft") {
+      for (const id of d.refs) {
+        const reason = d.promise?.reason;
+        if (!reason) continue;
+        completeDraft(db, id, reason, {
+          deadline: d.promise?.deadline_iso ?? null,
+          tags: d.promise?.tags ?? null,
+          text: d.promise?.text ?? null,
+        });
+        console.log(`(filled draft #${id})`);
+      }
     }
     if (d.intent === "done") d.refs.forEach((id) => updateStatus(db, id, "done"));
     if (d.intent === "drop") d.refs.forEach((id) => updateStatus(db, id, "dropped"));

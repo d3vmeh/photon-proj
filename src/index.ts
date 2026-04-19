@@ -6,6 +6,7 @@ import {
   findRelevant,
   updateStatus,
   rescheduleReceipt,
+  completeDraft,
   weeklyStats,
   type Receipt,
 } from "./db.js";
@@ -123,6 +124,31 @@ async function applyDecision(sender: string, d: Awaited<ReturnType<typeof decide
           tags: d.promise.tags,
         });
         console.log(`[receipts] saved #${saved.id}: "${saved.text}"`);
+      }
+      break;
+    case "ask_reason":
+      if (d.promise) {
+        const draft = addReceipt(db, {
+          handle: sender,
+          text: d.promise.text,
+          reason: null,
+          deadline: d.promise.deadline_iso,
+          tags: d.promise.tags,
+        });
+        db.prepare(`UPDATE receipts SET status = 'draft' WHERE id = ?`).run(draft.id);
+        console.log(`[receipts] draft #${draft.id} awaiting reason: "${draft.text}"`);
+      }
+      break;
+    case "complete_draft":
+      for (const id of d.refs) {
+        const reason = d.promise?.reason ?? null;
+        if (!reason) continue;
+        completeDraft(db, id, reason, {
+          deadline: d.promise?.deadline_iso ?? null,
+          tags: d.promise?.tags ?? null,
+          text: d.promise?.text ?? null,
+        });
+        console.log(`[receipts] filled draft #${id} with reason.`);
       }
       break;
     case "done":
