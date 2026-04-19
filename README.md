@@ -6,6 +6,8 @@ An iMessage-native agent built on [`@photon-ai/imessage-kit`](https://github.com
 
 ## The feel
 
+https://x.com/d3vmeh/status/2045767966617461167?s=20
+
 ```
 You (Mon 9pm):  I'll call my mom Wednesday. I keep putting it off and
                 she deserves better.
